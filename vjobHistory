@@ -1,0 +1,50 @@
+CREATE view [dbo].[vjobhistory] as
+			select 
+			ISNULL(instance_id, 0) as [eventID], -- esli 0 znachit nikogda ne vypolnalsa ( ili istoriu pochistili)
+			@@SERVERNAME as [servername],
+			 jt.JobName,
+			 jt.JobId, 
+			 h.step_id as 'Step', -- esli null znachit nikogda ne vypolnalsa
+			 jt.sStep,
+			 jt.enabled,
+			 jt.StepName,
+			 h.step_name as 'HistoryStepName',
+			 h.run_date,
+			 h.run_time,
+			msdb.dbo.agent_datetime(run_date, run_time) as 'RunDateTime',
+						((run_duration/10000*3600 + (run_duration/100)%100*60 + run_duration%100 + 31 ) / 60) 
+							as 'RunDurationMinutes',
+			/* не подходит для 2008*/
+			--First_VALUE (isnull(((run_duration/10000*3600 + (run_duration/100)%100*60 + run_duration%100 + 31 ) / 60), -1)) OVER (PARTITION BY jt.jobID ORDER BY instance_id desc ) as LastRunDurationMinutes,
+			
+			(select isnull(((run_duration/10000*3600 + (run_duration/100)%100*60 + run_duration%100 + 31 ) / 60), -1) from  msdb.dbo.sysjobhistory h2 where h2.job_id = jt.jobID and h2.instance_id = (select MAX(instance_id) from  msdb.dbo.sysjobhistory h3 where h2.job_id = h3.job_id) ) as LastRunDurationMinutes,
+			
+			-- не подходит для 2008
+			--max(instance_id) OVER (PARTITION BY jt.jobID ORDER BY instance_id desc ) as LastJobEventID,
+			
+			(select instance_id from  msdb.dbo.sysjobhistory h2 where h2.job_id = jt.jobID and h2.instance_id = (select MAX(instance_id) from  msdb.dbo.sysjobhistory h3 where h2.job_id = h3.job_id) ) as LastJobEventID,
+			
+			CONVERT(varchar,(CONVERT(datetime, CONVERT(CHAR(8), h.run_date))),111) AS [LastRunDate(YYYY/MM/DD)],
+			
+			left(Right(('000000'+ cast(h.run_time as varchar)),6),2) + ':' + substring(Right(('000000'+ cast(h.run_time as varchar)),6),3,2) + ':' + right(Right(('000000'+ cast(h.run_time as varchar)),6),2) AS [LastRunTime(MM/DD/SS)],
+			left(Right(('000000'+ cast(h.run_duration as varchar)),6),2) + ':' + substring(Right(('000000'+ cast(h.run_duration as varchar)),6),3,2) + ':' + right(Right(('000000'+ cast(h.run_duration as varchar)),6),2) as [JobDuration(MM/DD/SS)],
+
+			sql_message_id,
+			sql_severity,
+			case (h.run_status) when 0 then 'error' when 1 then 'success' when 2 then 'retry' when 3 then 'cancel' else 'unknown' end  as runStatus,-- 0=ошибка; 1=успешное выполнение; 2=повтор; 3=отмена; 
+			h.run_status as RunStatusInt,
+			[message],
+			jt.last_run_outcome --Результат предыдущего выполнения шага задания.  0=Неуспешно; 1=Успешно; 2=Повтор; 3=Отмена; 5=Неизвестно; 
+				
+						From (
+							select @@SERVERNAME as servername, J.name as jobName, J.job_id as JobId, s.step_id as sStep, s.step_name as StepName, s.last_run_outcome, j.enabled
+							from
+							msdb.dbo.sysjobs j (nolock) 
+							inner JOIN msdb.dbo.sysjobsteps s (nolock) ON j.job_id = s.job_id 
+							union all 
+							select @@SERVERNAME as servername , j.name as JobName, j.job_id as jobId,		0 as sStep, j.name as jobName,
+							-1 as last_run_outcome, j.enabled
+							from msdb.dbo.sysjobs j
+								) as jt
+						left join msdb.dbo.sysjobhistory h (nolock)
+								ON jt.JobId= h.job_id and (h.step_id = jt.sStep   )
